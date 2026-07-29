@@ -3,26 +3,29 @@
 An Arduino sketch that drives an SPI TFT display as a standalone gauge
 cluster for a **Baldur DID1** diesel ECU, reading live data over CAN bus.
 It does not modify or interfere with the ECU — it's a passive CAN client
-that can sit alongside TunerStudio on the same bus.
+that can sit alongside whatever tuning software you already use.
 
-## Why CAN, and why OBD-II PIDs
+This is built from section 4.2 ("OBD2 communications") of the actual
+DID1 reference manual, quoted directly from a user's own copy — not
+inferred from this repo's (unrelated) Speeduino firmware, and not
+scraped from a search-engine summary. Earlier drafts of this sketch made
+exactly that mistake (assuming DID1 shared Speeduino's CAN internals);
+that's been removed.
 
-This does **not** assume anything about Speeduino, despite living in this
-repo — the DID1 is not Speeduino-derived. The only DID1-specific claim
-this sketch relies on is that the DID1's reference manual (published by
-Baldur's Control Systems at `controls.is/manuals/did1.pdf`) documents it
-as implementing **ISO 15765-4 (11-bit) OBD-over-CAN**, specifically so it
-can be read by generic OBD2 scan tools, phone apps, and aftermarket
-gauges. That's a real, standardised protocol (SAE J1979 / ISO 15765-4),
-not something specific to this codebase, and it's what this sketch polls.
+## The protocol
 
-**Caveat on sourcing:** the build environment this was written in could
-not reach `controls.is` (blocked by network policy), so the manual was
-never read directly — the ISO 15765-4 claim above and the OBD2 connector
-pinout mentioned in the wiring section come from a web-search summary of
-the manual, not a first-hand read. Before wiring anything, pull up
-`https://controls.is/manuals/did1.pdf` yourself and check the CAN/OBD2
-section against what's written here and in the sketch's header comment.
+Per the manual, the DID1 supports **ISO 15765-4 (11-bit) OBD-over-CAN on
+CAN bus 1**, meant to be read by generic OBD2 scan tools, phone apps, and
+aftermarket gauges — which is exactly what this sketch does: it polls
+standard PID requests (`0x7DF` broadcast) and decodes the `0x7E8`
+responses.
+
+Three settings need to be enabled on the ECU itself for this to work
+(exact parameter names from the manual):
+
+- `CAN bus data mode` = `500kbit`
+- `CAN receiving enable` = `Enabled`
+- `OBD2 service enable` = `Enabled`
 
 ## Hardware you need
 
@@ -32,32 +35,34 @@ section against what's written here and in the sketch's header comment.
 - An SPI TFT display (e.g. a 2.4"/2.8"/3.2" ILI9341-based module — a
   common type sold on Alibaba/AliExpress as a "SPI TFT LCD module")
 
-**Before wiring anything, also confirm your display's driver chip.**
-The listing this was originally requested from (an Alibaba product page)
-couldn't be loaded — it returned a 403 both through the fetch tool and a
-direct request, and the page description alone wasn't enough to identify
-the exact hardware. The sketch is written for `Adafruit_ILI9341`, the
-most common chip on cheap SPI TFT boards. If your board's silkscreen or
-listing says ST7735, ST7789, or something else, swap the
+**Confirm your display's driver chip before wiring.** The listing this
+was originally requested from (an Alibaba product page) couldn't be
+loaded — it returned a 403 both through the fetch tool and a direct
+request — so the exact chip on your board is still unconfirmed. The
+sketch is written for `Adafruit_ILI9341`, the most common chip on cheap
+SPI TFT boards; if yours is ST7735, ST7789, etc., swap the
 `Adafruit_ILI9341` include/object for the matching Adafruit driver
-library — everything else in the sketch (the drawing code) is written
-against `Adafruit_GFX` and doesn't need to change.
+library. The drawing code is plain `Adafruit_GFX` and doesn't change.
 
 ## Wiring
 
-See the comment block at the top of `BaldurDID1_CAN_Dashboard.ino` for
-full pin-by-pin wiring. In short: both the CAN module and the TFT share
-the Mega's hardware SPI bus (pins 50/51/52) and each gets its own CS pin
-(9 for CAN, 10 for TFT by default — change the `#define`s if you wire it
-differently).
+Full pin-by-pin wiring is in the header comment of
+`BaldurDID1_CAN_Dashboard.ino`. Both the CAN module and the TFT share the
+Mega's hardware SPI bus (pins 50/51/52) with their own CS pin (9 for CAN,
+10 for TFT by default).
 
-Per the search summary of the DID1 manual, its OBD2 connector uses pin 6
-for CAN-H and pin 14 for CAN-L, with pins 4/5 as ground — verify this
-against the manual/your harness before connecting, per the caveat above.
+Per the manual, the DID1's OBD2 connector pinout is:
 
-The CAN bus needs 120 ohm termination resistors at **both** physical
-ends. Most MCP2515 breakout boards have a solder-jumper resistor — only
-enable it if the ECU end of the bus isn't already terminated.
+| Pin | Signal |
+|-----|--------|
+| 6   | CAN-H  |
+| 14  | CAN-L  |
+| 4, 5 | Ground |
+| 16  | +12V (ideally fused straight to battery) |
+
+A 120 ohm termination resistor across CAN-H/CAN-L may be needed if the
+bus doesn't already have one — most MCP2515 breakout boards have a
+solder jumper for this.
 
 ## Libraries (install via Arduino Library Manager)
 
@@ -65,36 +70,35 @@ enable it if the ECU end of the bus isn't already terminated.
 - `Adafruit GFX Library`
 - `Adafruit ILI9341` (or the matching driver for your display chip)
 
-## CAN bus speed
+## What's shown, and confidence level per gauge
 
-ISO 15765-4's 11-bit variant is standardised at 500 kbit/s, which is what
-the sketch defaults to (`CAN_BAUD`). The DID1 reportedly also has a
-second, separately configurable CAN interface for arbitrary data up to
-1 Mbps — that's not what this sketch talks to; it only uses the standard
-OBD2 service, so 500 kbit/s should be correct.
+The manual's PID table gives explicit value ranges for only two PIDs —
+MAP (`0x0B`, "0 - 2550mbar") and vehicle speed (`0x0D`, "0 - 255 km/h") —
+and both match the standard SAE J1979 decode formula for those PID
+numbers exactly. That's the basis for using the standard J1979 formula
+for every PID below.
 
-## What's shown, and what's actually verified
+**High confidence** (the DID1's stated meaning for the PID number matches
+its standard J1979 meaning exactly): coolant temp (`0x05`), MAP/boost
+(`0x0B`), RPM (`0x0C`), speed (`0x0D`), charge air temp (`0x0F`), **fuel
+rail pressure (`0x23`** — this is the genuine J1979 "fuel rail gauge
+pressure" PID, i.e. the diesel common-rail pressure reading you likely
+care about most), barometer (`0x33`), supply voltage (`0x42`), oil
+temperature (`0x5C`).
 
-RPM (PID `0x0C`) and coolant temperature (PID `0x05`) are close to
-universal on any OBD2-compliant ECU, diesel included, so these should
-work as-is.
+**Lower confidence** (DID1 repurposes a standard PID number for a
+diesel-specific value the J1979 table doesn't define, so only the *byte
+encoding* is assumed to carry over — not stated in the manual): pedal
+position (`0x11`, standard meaning is throttle position) and main
+injection angle cylinder 1 (`0x0E`, standard meaning is timing advance).
+Cross-check these two gauges against the DID1's own tuning software
+before trusting the numbers.
 
-The rest of the polled PIDs — MAP (`0x0B`), throttle position (`0x11`),
-barometric pressure (`0x33`), battery voltage (`0x42`), timing advance
-(`0x0E`), and road speed (`0x0D`) — are standard PIDs, but several of
-them (MAP, TPS) are gasoline-oriented and it's **not verified here**
-whether the DID1 populates them with meaningful values for a diesel
-engine (e.g. MAP as boost pressure, no throttle plate for TPS). Check
-each gauge against a known-good OBD2 scan tool/app connected to the same
-ECU before trusting it.
-
-Diesel-specific values like rail pressure are **not** standard PIDs and
-are not implemented in this sketch at all — earlier drafts of this code
-guessed at a manufacturer-specific PID for them based on the unrelated
-Speeduino codebase in this repo, which was a mistake since the DID1 isn't
-Speeduino-based; that guess has been removed. If the DID1 manual
-documents a manufacturer-specific PID (mode `0x22`) for such values, that
-would need to be added from the actual manual, not inferred.
+**Documented but not implemented**, to keep the sketch focused: lambda
+sensors 1/2 (`0x24`/`0x25`, 4-byte payload — straightforward to add) and
+exhaust gas temperature sensors 1-8 (`0x78`/`0x79` — these need
+multi-frame ISO-TP reassembly since the payload doesn't fit in one CAN
+frame, more work than a single `case` in `decodeStandardPid()`).
 
 ## Tuning the layout
 

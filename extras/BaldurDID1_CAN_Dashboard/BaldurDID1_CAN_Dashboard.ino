@@ -1,22 +1,19 @@
 /*
   Baldur DID1 -> Arduino Mega 2560 CAN dashboard
   ------------------------------------------------
-  Reads live engine data from a Baldur DID1 diesel ECU over CAN bus using
-  generic ISO 15765-4 (11-bit) OBD-II PID requests -- the same protocol
-  any standard OBD2 scan tool, phone app, or aftermarket gauge uses.
-
-  NOTE ON SOURCING: the DID1 is documented (controls.is, DID1 reference
-  manual) as implementing ISO 15765-4 OBD-over-CAN specifically so it can
-  be read by generic OBD2 accessories. That is the only DID1-specific
-  claim this sketch relies on; it is NOT related to, and does not assume
-  anything about, the Speeduino firmware in this repository. This sketch
-  was written without direct access to the DID1 manual's full text (the
-  build environment could not reach controls.is to fetch it), so it has
-  NOT been verified against the manual's actual supported-PID list --
-  see the caveat below.
+  Reads live engine data from a Baldur DID1 diesel ECU over CAN bus 1
+  using ISO 15765-4 (11-bit) OBD-II PID requests. This is built directly
+  from section 4.2 ("OBD2 communications") of the DID1 reference manual,
+  quoted by the user from their own copy -- not inferred from this
+  repo's (unrelated) Speeduino firmware and not scraped from a search
+  summary. Per the manual, OBD2 communication is on CAN bus 1 and
+  requires these ECU-side settings to be enabled:
+    CAN bus data mode     = 500kbit
+    CAN receiving enable  = Enabled
+    OBD2 service enable   = Enabled
 
   This does NOT modify the ECU. It is a separate, read-only CAN client
-  that polls standard PIDs and draws them on an SPI TFT.
+  that polls PIDs and draws them on an SPI TFT.
 
   Hardware
   --------
@@ -28,7 +25,10 @@
     controllers). If your board uses a different driver chip (ST7735,
     ST7789, etc.), swap the two ADAFRUIT_* includes/object below for the
     matching Adafruit driver library -- the drawing code is unchanged
-    because it only uses Adafruit_GFX primitives.
+    because it only uses Adafruit_GFX primitives. (This sketch was
+    originally requested against a specific Alibaba display listing that
+    could not be loaded -- 403 on every fetch attempt -- so the exact
+    driver chip on your board is still unconfirmed; verify it yourself.)
 
   Wiring (change the #defines below to match your actual wiring)
   -----------------------------------------------------------------------
@@ -37,13 +37,13 @@
       SCK -> 52   SI(MOSI) -> 51   SO(MISO) -> 50
       CS  -> pin 9   INT -> pin 2 (not used by this sketch, wired for
              future use / some breakout boards require it pulled up)
-      CAN_H / CAN_L -> the DID1's CAN bus. On the DID1's OBD2 connector
-      this is pin 6 (CAN-H) and pin 14 (CAN-L), grounded via pins 4/5 --
-      confirm against your own harness/manual before wiring, this is
-      taken from a search summary of the manual, not a verified read of
-      it. The bus needs 120 ohm termination at *each* end; most MCP2515
-      breakout boards have a solder jumper to add one -- only enable it
-      if the ECU end doesn't already terminate the bus.
+      CAN_H / CAN_L -> the DID1's CAN bus 1. Per the manual, on the DID1's
+      OBD2 connector this is pin 6 (CAN-H) and pin 14 (CAN-L); pins 4 and
+      5 are ground and pin 16 is +12V (ideally fused straight to
+      battery, per the OBD2 standard, though a switched 12V feed usually
+      works too). A 120 ohm termination resistor across CAN-H/CAN-L may
+      be needed if the bus doesn't already have one -- most MCP2515
+      breakout boards have a solder jumper for this.
 
     TFT module (SPI mode):
       VCC -> 5V (or 3.3V -- check your board)   GND -> GND
@@ -56,29 +56,35 @@
     - "Adafruit GFX Library"
     - "Adafruit ILI9341"
 
-  CAN bus speed
+  PID formulas -- what's confirmed vs. assumed
   -----------------------------------------------------------------------
-  ISO 15765-4's 11-bit variant is standardised at 500 kbit/s, which is
-  what CAN_BAUD is set to below. The DID1 manual reportedly also supports
-  a second, configurable CAN interface up to 1 Mbps for arbitrary data --
-  that is NOT what this sketch talks to; it only uses the standard OBD2
-  service, so 500 kbit/s should be correct unless you've been told
-  otherwise for your specific ECU configuration.
-
-  IMPORTANT -- verify which PIDs actually return real data on YOUR ECU
-  -----------------------------------------------------------------------
-  RPM (0x0C) and coolant temperature (0x05) are close to universal on any
-  OBD2-compliant ECU. The rest of the PIDs polled below (MAP, TPS,
-  timing advance, barometric pressure, battery voltage, speed) are
-  standard gasoline-oriented PIDs; whether a diesel ECU like the DID1
-  populates them with meaningful values (e.g. TPS without a throttle
-  plate, or MAP as boost pressure) is unverified here. Diesel-specific
-  values like rail pressure are NOT standard PIDs at all -- they would
-  only be readable if the DID1 documents a manufacturer-specific PID
-  (mode 0x22) for them, which this sketch does not assume or implement.
-  Before trusting any gauge on this display, cross-check its value
-  against a known-good OBD2 scan tool/app connected to the same ECU, or
-  against the DID1 manual's own PID list once you can read it in full.
+  The manual lists which PIDs the DID1 reports, but only gives explicit
+  value ranges for two of them: MAP (0x0B, "0 - 2550mbar") and vehicle
+  speed (0x0D, "0 - 255 km/h"). Both match the standard SAE J1979 formula
+  for those PID numbers exactly (raw byte A directly, in kPa for MAP,
+  i.e. A*10 = mbar; A = km/h for speed), which is why every PID below
+  uses the standard J1979 decode formula for its PID number. Confidence
+  varies by PID:
+    - HIGH confidence (PID number's standard meaning matches the DID1's
+      stated meaning exactly): coolant temp (0x05), MAP (0x0B), RPM
+      (0x0C), speed (0x0D), charge air/IAT (0x0F), fuel rail pressure
+      (0x23, the real J1979 "fuel rail gauge pressure" PID -- this is
+      the diesel rail pressure reading), barometer (0x33), supply
+      voltage (0x42), oil temperature (0x5C).
+    - LOWER confidence (DID1 repurposes a standard PID number to a
+      diesel-specific meaning the J1979 table doesn't define, so the
+      *byte encoding* is assumed to follow the standard PID's formula
+      but that reuse isn't stated in the manual): accelerator pedal
+      position (0x11, standard PID 0x11 is throttle position, formula
+      A*100/255) and main injection angle cylinder 1 (0x0E, standard PID
+      0x0E is timing advance, formula A/2-64 degrees). Sanity-check these
+      two against the DID1's own tuning software before trusting them.
+  Values NOT decoded here despite being in the manual's PID list: lambda
+  sensors (0x24/0x25, 4-byte payload) and exhaust gas temps (0x78/0x79,
+  which need multi-frame ISO-TP reassembly since the payload is too long
+  for a single CAN frame) -- both are straightforward to add following
+  the same pattern if you want them, just left out to keep this sketch
+  focused.
 */
 
 #include <SPI.h>
@@ -107,23 +113,26 @@
 #define OBD_RESPONSE_ID  0x7E8UL   // standard single-ECU OBD2 response ID
 
 // ---------------------------------------------------------------------
-// Standard OBD-II PIDs we poll (mode 0x01)
+// OBD-II PIDs the DID1 manual documents as reported (mode 0x01)
 // ---------------------------------------------------------------------
 enum : uint8_t {
-  PID_RPM       = 0x0C,
-  PID_COOLANT   = 0x05,
-  PID_MAP       = 0x0B,
-  PID_IAT       = 0x0F,
-  PID_TPS       = 0x11,
-  PID_TIMING    = 0x0E,
-  PID_SPEED     = 0x0D,
-  PID_BARO      = 0x33,
-  PID_BATTERY   = 0x42,
+  PID_COOLANT        = 0x05,
+  PID_MAP             = 0x0B,
+  PID_RPM             = 0x0C,
+  PID_SPEED           = 0x0D,
+  PID_INJ_ANGLE       = 0x0E, // "Main injection angle cylinder 1" -- see header note
+  PID_CHARGE_AIR_TEMP = 0x0F,
+  PID_PEDAL_POSITION  = 0x11, // "Effective accelerator pedal position" -- see header note
+  PID_RAIL_PRESSURE   = 0x23, // "Fuel rail pressure"
+  PID_BARO            = 0x33,
+  PID_SUPPLY_VOLTAGE  = 0x42,
+  PID_OIL_TEMP        = 0x5C,
 };
 
 const uint8_t stdPidList[] = {
-  PID_RPM, PID_COOLANT, PID_MAP, PID_IAT, PID_TPS,
-  PID_TIMING, PID_SPEED, PID_BARO, PID_BATTERY
+  PID_COOLANT, PID_MAP, PID_RPM, PID_SPEED, PID_INJ_ANGLE,
+  PID_CHARGE_AIR_TEMP, PID_PEDAL_POSITION, PID_RAIL_PRESSURE,
+  PID_BARO, PID_SUPPLY_VOLTAGE, PID_OIL_TEMP
 };
 const uint8_t stdPidCount = sizeof(stdPidList) / sizeof(stdPidList[0]);
 uint8_t pidCursor = 0;
@@ -135,15 +144,17 @@ Adafruit_ILI9341 tft(TFT_CS, TFT_DC, TFT_RST);
 // Latest decoded engine data
 // ---------------------------------------------------------------------
 struct EngineData {
-  int16_t rpm         = 0;
-  int16_t coolantC    = 0;
-  int16_t mapKPa      = 0;
-  int16_t iatC         = 0;
-  uint8_t tpsPct       = 0;
-  int8_t  timingAdv    = 0;
-  uint8_t speedKmh     = 0;
-  uint8_t baroKPa      = 0;
-  float   batteryV     = 0.0f;
+  int16_t  rpm            = 0;
+  int16_t  coolantC       = 0;
+  uint16_t mapMbar        = 0;
+  int16_t  chargeAirC     = 0;
+  uint8_t  pedalPct       = 0;
+  float    injAngleDeg    = 0.0f;
+  uint8_t  speedKmh       = 0;
+  uint8_t  baroKPa        = 0;
+  float    supplyV        = 0.0f;
+  uint32_t railPressureKPa = 0;
+  int16_t  oilTempC       = 0;
   unsigned long lastRxMillis = 0;
 } engine;
 
@@ -231,15 +242,17 @@ void decodeStandardPid(uint8_t pid, uint8_t *buf)
 
   switch (pid)
   {
-    case PID_RPM:      engine.rpm      = (((uint16_t)A << 8) | B) / 4; break;
-    case PID_COOLANT:  engine.coolantC = (int16_t)A - 40; break;
-    case PID_MAP:      engine.mapKPa   = A; break;
-    case PID_IAT:      engine.iatC     = (int16_t)A - 40; break;
-    case PID_TPS:      engine.tpsPct   = ((uint16_t)A * 100) / 255; break;
-    case PID_TIMING:   engine.timingAdv = ((int16_t)A / 2) - 64; break;
-    case PID_SPEED:    engine.speedKmh = A; break;
-    case PID_BARO:     engine.baroKPa  = A; break;
-    case PID_BATTERY:  engine.batteryV = (((uint16_t)A << 8) | B) / 1000.0f; break;
+    case PID_COOLANT:        engine.coolantC    = (int16_t)A - 40; break;
+    case PID_MAP:             engine.mapMbar     = (uint16_t)A * 10; break; // manual: 0-2550mbar
+    case PID_RPM:             engine.rpm         = (((uint16_t)A << 8) | B) / 4; break;
+    case PID_SPEED:           engine.speedKmh    = A; break; // manual: 0-255 km/h
+    case PID_INJ_ANGLE:       engine.injAngleDeg = ((float)A / 2.0f) - 64.0f; break; // assumed, see header note
+    case PID_CHARGE_AIR_TEMP: engine.chargeAirC  = (int16_t)A - 40; break;
+    case PID_PEDAL_POSITION:  engine.pedalPct    = ((uint16_t)A * 100) / 255; break; // assumed, see header note
+    case PID_RAIL_PRESSURE:   engine.railPressureKPa = 10UL * (((uint16_t)A << 8) | B); break;
+    case PID_BARO:            engine.baroKPa     = A; break;
+    case PID_SUPPLY_VOLTAGE:  engine.supplyV     = (((uint16_t)A << 8) | B) / 1000.0f; break;
+    case PID_OIL_TEMP:        engine.oilTempC    = (int16_t)A - 40; break;
     default: break;
   }
 }
@@ -254,34 +267,43 @@ void decodeStandardPid(uint8_t pid, uint8_t *buf)
 #define COLOR_WARN   ILI9341_RED
 #define COLOR_GOOD   ILI9341_GREEN
 
+// 3-column grid below the RPM header row. Columns at x = 6 / 112 / 218,
+// each ~100px wide on a 320px-wide landscape screen.
+#define COL0_X 6
+#define COL1_X 112
+#define COL2_X 218
+
 void drawStaticLayout()
 {
   tft.setTextColor(COLOR_LABEL);
-
   tft.setTextSize(2);
-  tft.setCursor(10, 4);
+
+  tft.setCursor(COL0_X, 4);
   tft.print(F("RPM"));
 
-  tft.setCursor(200, 4);
+  tft.setCursor(COL0_X, 54);
   tft.print(F("COOLANT"));
-
-  tft.setCursor(10, 90);
+  tft.setCursor(COL1_X, 54);
   tft.print(F("BOOST/MAP"));
+  tft.setCursor(COL2_X, 54);
+  tft.print(F("RAIL PRES"));
 
-  tft.setCursor(200, 90);
-  tft.print(F("TPS"));
-
-  tft.setCursor(10, 150);
-  tft.print(F("IAT"));
-  tft.setCursor(100, 150);
+  tft.setCursor(COL0_X, 108);
+  tft.print(F("CHG AIR"));
+  tft.setCursor(COL1_X, 108);
   tft.print(F("BARO"));
-  tft.setCursor(200, 150);
-  tft.print(F("SPD"));
+  tft.setCursor(COL2_X, 108);
+  tft.print(F("SPEED"));
 
-  tft.setCursor(10, 190);
-  tft.print(F("BATT"));
-  tft.setCursor(100, 190);
-  tft.print(F("ADV"));
+  tft.setCursor(COL0_X, 154);
+  tft.print(F("SUPPLY V"));
+  tft.setCursor(COL1_X, 154);
+  tft.print(F("PEDAL"));
+  tft.setCursor(COL2_X, 154);
+  tft.print(F("OIL TEMP"));
+
+  tft.setCursor(COL0_X, 200);
+  tft.print(F("INJ ANGLE"));
 }
 
 // Small helper: clear a value field then print new text
@@ -306,35 +328,39 @@ void updateDisplay()
 
   if (stale)
   {
-    printField(10, 25, 180, 40, COLOR_WARN, 4, F("NO CAN"));
+    printField(COL0_X, 25, 300, 24, COLOR_WARN, 3, F("NO CAN"));
     return;
   }
 
-  // RPM, big numbers
-  printField(10, 25, 180, 40, COLOR_VALUE, 4, String(engine.rpm));
+  // RPM, big numbers, full width
+  printField(COL0_X, 25, 300, 24, COLOR_VALUE, 3, String(engine.rpm));
 
-  // Coolant, colour-warns above 100C
+  // Coolant / boost / rail pressure row
   uint16_t coolantColor = (engine.coolantC >= 100) ? COLOR_WARN : COLOR_VALUE;
-  printField(200, 25, 100, 30, coolantColor, 3, String(engine.coolantC) + "C");
+  printField(COL0_X, 74, 100, 24, coolantColor, 2, String(engine.coolantC) + "C");
 
-  // Boost/MAP relative to barometric pressure, shown alongside absolute kPa
-  int16_t boostKPa = engine.mapKPa - engine.baroKPa;
-  printField(10, 112, 150, 30, COLOR_VALUE,
-             3, String(engine.mapKPa) + "kPa");
-  printField(10, 140, 150, 20, COLOR_LABEL,
-             2, (boostKPa >= 0 ? "+" : "") + String(boostKPa) + "kPa boost");
+  int32_t boostMbar = (int32_t)engine.mapMbar - ((int32_t)engine.baroKPa * 10);
+  printField(COL1_X, 74, 100, 24, COLOR_VALUE, 2,
+             String(engine.mapMbar / 1000.0f, 2) + "bar");
+  printField(COL1_X, 92, 100, 14, COLOR_LABEL, 1,
+             (boostMbar >= 0 ? "+" : "") + String(boostMbar / 1000.0f, 2) + "bar boost");
 
-  // TPS
-  printField(200, 112, 100, 30, COLOR_VALUE, 3, String(engine.tpsPct) + "%");
+  printField(COL2_X, 74, 100, 24, COLOR_VALUE, 2,
+             String(engine.railPressureKPa / 100.0f, 0) + "bar");
 
-  // IAT / Baro / Speed
-  printField(10, 168, 80, 20, COLOR_VALUE, 2, String(engine.iatC) + "C");
-  printField(100, 168, 80, 20, COLOR_VALUE, 2, String(engine.baroKPa) + "kPa");
-  printField(200, 168, 80, 20, COLOR_VALUE, 2, String(engine.speedKmh) + "km/h");
+  // Charge air temp / barometer / speed row
+  printField(COL0_X, 128, 100, 20, COLOR_VALUE, 2, String(engine.chargeAirC) + "C");
+  printField(COL1_X, 128, 100, 20, COLOR_VALUE, 2, String(engine.baroKPa) + "kPa");
+  printField(COL2_X, 128, 100, 20, COLOR_VALUE, 2, String(engine.speedKmh) + "km/h");
 
-  // Battery / Timing advance
-  uint16_t battColor = (engine.batteryV < 11.5f || engine.batteryV > 15.0f)
+  // Supply voltage / pedal position / oil temp row
+  uint16_t suppColor = (engine.supplyV < 11.5f || engine.supplyV > 15.0f)
                           ? COLOR_WARN : COLOR_GOOD;
-  printField(10, 208, 80, 20, battColor, 2, String(engine.batteryV, 1) + "V");
-  printField(100, 208, 80, 20, COLOR_VALUE, 2, String(engine.timingAdv) + "d");
+  printField(COL0_X, 174, 100, 20, suppColor, 2, String(engine.supplyV, 1) + "V");
+  printField(COL1_X, 174, 100, 20, COLOR_VALUE, 2, String(engine.pedalPct) + "%");
+  uint16_t oilColor = (engine.oilTempC >= 130) ? COLOR_WARN : COLOR_VALUE;
+  printField(COL2_X, 174, 100, 20, oilColor, 2, String(engine.oilTempC) + "C");
+
+  // Injection angle
+  printField(COL0_X, 220, 150, 18, COLOR_VALUE, 2, String(engine.injAngleDeg, 1) + "d");
 }
