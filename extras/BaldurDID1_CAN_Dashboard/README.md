@@ -3,7 +3,7 @@
 An Arduino sketch that drives an SPI TFT display as a standalone gauge
 cluster for a **Baldur DID1** diesel ECU, reading live data over CAN bus.
 It does not modify or interfere with the ECU — it's a passive CAN client
-that can sit alongside whatever tuning software you already use.
+that can sit alongside BG Calibrator (the DID1's own tuning software).
 
 This is built from section 4.2 ("OBD2 communications") of the actual
 DID1 reference manual, quoted directly from a user's own copy — not
@@ -91,7 +91,7 @@ diesel-specific value the J1979 table doesn't define, so only the *byte
 encoding* is assumed to carry over — not stated in the manual): pedal
 position (`0x11`, standard meaning is throttle position) and main
 injection angle cylinder 1 (`0x0E`, standard meaning is timing advance).
-Cross-check these two gauges against the DID1's own tuning software
+Cross-check these two gauges against the live values in BG Calibrator
 before trusting the numbers.
 
 **Documented but not implemented**, to keep the sketch focused: lambda

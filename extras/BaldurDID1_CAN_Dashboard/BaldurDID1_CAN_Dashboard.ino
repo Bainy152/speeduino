@@ -78,7 +78,8 @@
       position (0x11, standard PID 0x11 is throttle position, formula
       A*100/255) and main injection angle cylinder 1 (0x0E, standard PID
       0x0E is timing advance, formula A/2-64 degrees). Sanity-check these
-      two against the DID1's own tuning software before trusting them.
+      two against the live values in BG Calibrator (the DID1's own
+      tuning software) before trusting them.
   Values NOT decoded here despite being in the manual's PID list: lambda
   sensors (0x24/0x25, 4-byte payload) and exhaust gas temps (0x78/0x79,
   which need multi-frame ISO-TP reassembly since the payload is too long
