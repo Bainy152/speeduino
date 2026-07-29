@@ -1,14 +1,22 @@
 /*
   Baldur DID1 -> Arduino Mega 2560 CAN dashboard
   ------------------------------------------------
-  Reads live engine data from a Baldur DID1 ECU (a Speeduino-derived diesel
-  injection controller) over its onboard CAN bus, using the standard OBD-II
-  PID emulation that the Speeduino/Baldur firmware family implements for
-  external dashes and loggers (see speeduino/cancomms.ino: can_Command() /
-  obd_response(), which answers broadcast ID 0x7DF with responses on 0x7E8).
+  Reads live engine data from a Baldur DID1 diesel ECU over CAN bus using
+  generic ISO 15765-4 (11-bit) OBD-II PID requests -- the same protocol
+  any standard OBD2 scan tool, phone app, or aftermarket gauge uses.
 
-  This does NOT modify the ECU firmware. It is a separate, read-only CAN
-  client that polls standard PIDs and draws them on an SPI TFT.
+  NOTE ON SOURCING: the DID1 is documented (controls.is, DID1 reference
+  manual) as implementing ISO 15765-4 OBD-over-CAN specifically so it can
+  be read by generic OBD2 accessories. That is the only DID1-specific
+  claim this sketch relies on; it is NOT related to, and does not assume
+  anything about, the Speeduino firmware in this repository. This sketch
+  was written without direct access to the DID1 manual's full text (the
+  build environment could not reach controls.is to fetch it), so it has
+  NOT been verified against the manual's actual supported-PID list --
+  see the caveat below.
+
+  This does NOT modify the ECU. It is a separate, read-only CAN client
+  that polls standard PIDs and draws them on an SPI TFT.
 
   Hardware
   --------
@@ -29,9 +37,13 @@
       SCK -> 52   SI(MOSI) -> 51   SO(MISO) -> 50
       CS  -> pin 9   INT -> pin 2 (not used by this sketch, wired for
              future use / some breakout boards require it pulled up)
-      CAN_H / CAN_L -> ECU's CAN bus. The bus needs 120 ohm termination at
-      *each* end. Most MCP2515 breakout boards have a solder jumper to add
-      one; only enable it if the ECU end doesn't already terminate the bus.
+      CAN_H / CAN_L -> the DID1's CAN bus. On the DID1's OBD2 connector
+      this is pin 6 (CAN-H) and pin 14 (CAN-L), grounded via pins 4/5 --
+      confirm against your own harness/manual before wiring, this is
+      taken from a search summary of the manual, not a verified read of
+      it. The bus needs 120 ohm termination at *each* end; most MCP2515
+      breakout boards have a solder jumper to add one -- only enable it
+      if the ECU end doesn't already terminate the bus.
 
     TFT module (SPI mode):
       VCC -> 5V (or 3.3V -- check your board)   GND -> GND
@@ -44,31 +56,29 @@
     - "Adafruit GFX Library"
     - "Adafruit ILI9341"
 
-  ECU-side configuration (in TunerStudio, on the Baldur DID1 project)
+  CAN bus speed
   -----------------------------------------------------------------------
-    - CAN Configuration page: enable the internal/onboard CAN module,
-      confirm the CAN speed (500000 kbps is the Speeduino/Baldur default --
-      change CAN_BAUD below to match if you've changed it on the ECU).
-    - This sketch only needs the ECU to answer standard OBD-II PID
-      requests -- no per-channel CAN broadcast setup is required, since it
-      polls the built-in OBD emulation directly.
+  ISO 15765-4's 11-bit variant is standardised at 500 kbit/s, which is
+  what CAN_BAUD is set to below. The DID1 manual reportedly also supports
+  a second, configurable CAN interface up to 1 Mbps for arbitrary data --
+  that is NOT what this sketch talks to; it only uses the standard OBD2
+  service, so 500 kbit/s should be correct unless you've been told
+  otherwise for your specific ECU configuration.
 
-  IMPORTANT caveat about "custom" channels
+  IMPORTANT -- verify which PIDs actually return real data on YOUR ECU
   -----------------------------------------------------------------------
-  Standard OBD-II PIDs (RPM, coolant, MAP, IAT, TPS, battery voltage,
-  barometric pressure, timing advance, speed) are answered from fixed,
-  documented formulas and are safe to rely on across Speeduino/Baldur
-  firmware versions.
-
-  Baldur DID1 also exposes *every* other live variable (e.g. rail
-  pressure, injector duty, etc.) via a custom PID (mode 0x22, PID high
-  byte 0x78) that indexes directly into the firmware's internal status
-  array. That array's layout is firmware-specific and can change between
-  Baldur versions/forks, so the offsets below (CUSTOM_PID_RAIL_PRESSURE
-  etc.) are placeholders -- verify them against your actual Baldur DID1
-  firmware source (or cross-check the decoded value against TunerStudio's
-  live gauges) before trusting them. Custom PIDs are OFF by default; set
-  ENABLE_CUSTOM_PIDS to 1 once you've confirmed the offsets.
+  RPM (0x0C) and coolant temperature (0x05) are close to universal on any
+  OBD2-compliant ECU. The rest of the PIDs polled below (MAP, TPS,
+  timing advance, barometric pressure, battery voltage, speed) are
+  standard gasoline-oriented PIDs; whether a diesel ECU like the DID1
+  populates them with meaningful values (e.g. TPS without a throttle
+  plate, or MAP as boost pressure) is unverified here. Diesel-specific
+  values like rail pressure are NOT standard PIDs at all -- they would
+  only be readable if the DID1 documents a manufacturer-specific PID
+  (mode 0x22) for them, which this sketch does not assume or implement.
+  Before trusting any gauge on this display, cross-check its value
+  against a known-good OBD2 scan tool/app connected to the same ECU, or
+  against the DID1 manual's own PID list once you can read it in full.
 */
 
 #include <SPI.h>
@@ -93,14 +103,8 @@
 #define CAN_CRYSTAL  MCP_16MHZ     // most MCP2515 boards use a 16MHz crystal;
                                    // change to MCP_8MHZ if yours is 8MHz
 
-#define OBD_REQUEST_ID   0x7DFUL   // broadcast functional request, matches
-                                   // the check in cancomms.ino can_Command()
-#define OBD_RESPONSE_ID  0x7E8UL   // fixed response ID used by obd_response()
-
-// Enable to poll firmware-specific channels (see caveat above)
-#define ENABLE_CUSTOM_PIDS 0
-#define CUSTOM_PID_RAIL_PRESSURE 103  // placeholder offset -- verify!
-#define CUSTOM_PID_OIL_PRESSURE  104  // placeholder offset -- verify!
+#define OBD_REQUEST_ID   0x7DFUL   // standard OBD2 functional broadcast request
+#define OBD_RESPONSE_ID  0x7E8UL   // standard single-ECU OBD2 response ID
 
 // ---------------------------------------------------------------------
 // Standard OBD-II PIDs we poll (mode 0x01)
@@ -140,8 +144,6 @@ struct EngineData {
   uint8_t speedKmh     = 0;
   uint8_t baroKPa      = 0;
   float   batteryV     = 0.0f;
-  int16_t railPressure = 0;
-  int16_t oilPressure  = 0;
   unsigned long lastRxMillis = 0;
 } engine;
 
@@ -191,33 +193,12 @@ void pollNextPid()
   if (now - lastPollMillis < POLL_INTERVAL_MS) { return; }
   lastPollMillis = now;
 
-#if ENABLE_CUSTOM_PIDS
-  // Interleave one custom-channel request every few standard requests
-  static uint8_t customTurn = 0;
-  if (customTurn == 0)
-  {
-    sendCustomPidRequest(CUSTOM_PID_RAIL_PRESSURE);
-    customTurn = 5;
-    return;
-  }
-  customTurn--;
-#endif
-
   uint8_t pid = stdPidList[pidCursor];
   pidCursor = (pidCursor + 1) % stdPidCount;
 
   uint8_t data[8] = { 0x02, 0x01, pid, 0x00, 0x00, 0x00, 0x00, 0x00 };
   CAN.sendMsgBuf(OBD_REQUEST_ID, 0, 8, data);
 }
-
-#if ENABLE_CUSTOM_PIDS
-void sendCustomPidRequest(uint8_t channelIndex)
-{
-  // mode 0x22, PID high byte 0x78, PID low byte = channel index
-  uint8_t data[8] = { 0x03, 0x22, channelIndex, 0x78, 0x00, 0x00, 0x00, 0x00 };
-  CAN.sendMsgBuf(OBD_REQUEST_ID, 0, 8, data);
-}
-#endif
 
 // ---------------------------------------------------------------------
 // Read and decode any pending CAN responses
@@ -240,10 +221,6 @@ void readCanResponses()
     {
       decodeStandardPid(buf[2], buf);
     }
-    else if (buf[1] == 0x62) // custom mode response (mode 0x22 + 0x40)
-    {
-      decodeCustomPid(buf[2], buf[3], buf);
-    }
   }
 }
 
@@ -265,15 +242,6 @@ void decodeStandardPid(uint8_t pid, uint8_t *buf)
     case PID_BATTERY:  engine.batteryV = (((uint16_t)A << 8) | B) / 1000.0f; break;
     default: break;
   }
-}
-
-void decodeCustomPid(uint8_t channelIndex, uint8_t pidHigh, uint8_t *buf)
-{
-  if (pidHigh != 0x78) { return; }
-  int16_t value = (int16_t)(((uint16_t)buf[5] << 8) | buf[4]);
-
-  if (channelIndex == CUSTOM_PID_RAIL_PRESSURE) { engine.railPressure = value; }
-  else if (channelIndex == CUSTOM_PID_OIL_PRESSURE) { engine.oilPressure = value; }
 }
 
 // ---------------------------------------------------------------------
@@ -314,11 +282,6 @@ void drawStaticLayout()
   tft.print(F("BATT"));
   tft.setCursor(100, 190);
   tft.print(F("ADV"));
-
-#if ENABLE_CUSTOM_PIDS
-  tft.setCursor(200, 190);
-  tft.print(F("RAIL"));
-#endif
 }
 
 // Small helper: clear a value field then print new text
@@ -374,8 +337,4 @@ void updateDisplay()
                           ? COLOR_WARN : COLOR_GOOD;
   printField(10, 208, 80, 20, battColor, 2, String(engine.batteryV, 1) + "V");
   printField(100, 208, 80, 20, COLOR_VALUE, 2, String(engine.timingAdv) + "d");
-
-#if ENABLE_CUSTOM_PIDS
-  printField(200, 208, 100, 20, COLOR_VALUE, 2, String(engine.railPressure));
-#endif
 }
